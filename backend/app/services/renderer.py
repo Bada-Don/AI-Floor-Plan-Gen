@@ -1,0 +1,1 @@
+# Matplotlib → SVG/PNG output

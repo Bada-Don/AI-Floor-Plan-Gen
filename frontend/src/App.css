@@ -1,0 +1,4 @@
+/* Reset demo styles so the dashboard can take full width */
+html, body, #root {
+  height: 100%;
+}
