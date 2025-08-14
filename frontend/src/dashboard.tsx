@@ -139,6 +139,7 @@ export default function GenerativeLayoutUI() {
 
   // layout preview
   const [layout, setLayout] = useState<LayoutResponse | null>(null);
+  const [svgContent, setSvgContent] = useState<string | null>(null);
 
   // undo/redo
   const [history, setHistory] = useState<StructuredConstraints[]>([]);
@@ -175,6 +176,7 @@ export default function GenerativeLayoutUI() {
     setLastError(null);
     setConflicts([]);
     setSuggestions([]);
+    setSvgContent(null); // Clear SVG content on new generation
     try {
       const res = await fetch("/generate-layout", {
         method: "POST",
@@ -185,7 +187,7 @@ export default function GenerativeLayoutUI() {
         body: JSON.stringify({
           sessionId,
           mode,
-          input: mode === "freeform" ? { text: freeform } : constraints,
+          ...(mode === "freeform" ? { freeform: { text: freeform } } : { structured: constraints }),
         }),
       });
 
@@ -196,10 +198,14 @@ export default function GenerativeLayoutUI() {
         setConflicts(err.conflicts || []);
         setSuggestions(err.suggestions || []);
         setLayout(null);
+        setSvgContent(null); // Clear SVG content on error
         return;
       }
 
       setLayout(data as LayoutResponse);
+      if (data.svg) {
+        setSvgContent(data.svg);
+      }
     } catch (e: any) {
       setLastError(e?.message || "Network error");
     } finally {
@@ -212,6 +218,7 @@ export default function GenerativeLayoutUI() {
     setLastError(null);
     setConflicts([]);
     setSuggestions([]);
+    setSvgContent(null); // Clear SVG content on new change
     try {
       const res = await fetch("/generate-layout", {
         method: "POST",
@@ -234,9 +241,13 @@ export default function GenerativeLayoutUI() {
         setConflicts(err.conflicts || []);
         setSuggestions(err.suggestions || []);
         setLayout(null);
+        setSvgContent(null); // Clear SVG content on error
         return;
       }
       setLayout(data as LayoutResponse);
+      if (data.svg) {
+        setSvgContent(data.svg);
+      }
     } catch (e: any) {
       setLastError(e?.message || "Network error");
     } finally {
@@ -414,7 +425,7 @@ export default function GenerativeLayoutUI() {
     );
   };
 
-  const SVGPreview: React.FC<{ layout: LayoutResponse | null }> = ({ layout }) => {
+  const SVGPreview: React.FC<{ layout: LayoutResponse | null; svgContent: string | null }> = ({ layout, svgContent }) => {
     const containerRef = useRef<HTMLDivElement>(null);
     const [size, setSize] = useState({ w: 800, h: 480 });
 
@@ -436,48 +447,52 @@ export default function GenerativeLayoutUI() {
 
     return (
       <div ref={containerRef} className="w-full h-[480px] rounded-2xl bg-muted/30 relative overflow-hidden">
-        <svg width={size.w} height={size.h} className="absolute inset-0">
-          {/* Lot background */}
-          <g transform={`translate(${offsetX},${offsetY}) scale(${scale})`}>
-            <rect x={0} y={0} width={lotW} height={lotH} rx={2} ry={2} fill="#f6f7f9" stroke="#e2e8f0" />
-            {/* grid */}
-            {Array.from({ length: Math.ceil(lotW / 5) + 1 }, (_, i) => (
-              <line key={`vg${i}`} x1={i * 5} y1={0} x2={i * 5} y2={lotH} stroke="#eaecef" strokeWidth={0.3} />
-            ))}
-            {Array.from({ length: Math.ceil(lotH / 5) + 1 }, (_, i) => (
-              <line key={`hg${i}`} x1={0} y1={i * 5} x2={lotW} y2={i * 5} stroke="#eaecef" strokeWidth={0.3} />
-            ))}
-
-            {/* Features */}
-            <AnimatePresence>
-              {layout?.features?.map((f) => (
-                <motion.g
-                  key={`${f.type}-${f.x}-${f.y}-${f.width}-${f.height}`}
-                  initial={{ opacity: 0, scale: 0.98 }}
-                  animate={{ opacity: 1, scale: 1 }}
-                  exit={{ opacity: 0, scale: 0.98 }}
-                >
-                  <rect
-                    x={f.x}
-                    y={f.y}
-                    width={f.width}
-                    height={f.height}
-                    rx={1.5}
-                    ry={1.5}
-                    fill={colorForType(f.type)}
-                    opacity={0.2}
-                    stroke={colorForType(f.type)}
-                    strokeWidth={0.8}
-                  />
-                  <text x={f.x + 2} y={f.y + 6} fontSize={3} fill="#334155">
-                    {f.type}
-                  </text>
-                </motion.g>
+        {svgContent ? (
+          <div dangerouslySetInnerHTML={{ __html: svgContent }} />
+        ) : (
+          <svg width={size.w} height={size.h} className="absolute inset-0">
+            {/* Lot background */}
+            <g transform={`translate(${offsetX},${offsetY}) scale(${scale})`}>
+              <rect x={0} y={0} width={lotW} height={lotH} rx={2} ry={2} fill="#f6f7f9" stroke="#e2e8f0" />
+              {/* grid */}
+              {Array.from({ length: Math.ceil(lotW / 5) + 1 }, (_, i) => (
+                <line key={`vg${i}`} x1={i * 5} y1={0} x2={i * 5} y2={lotH} stroke="#eaecef" strokeWidth={0.3} />
               ))}
-            </AnimatePresence>
-          </g>
-        </svg>
-        {!layout && (
+              {Array.from({ length: Math.ceil(lotH / 5) + 1 }, (_, i) => (
+                <line key={`hg${i}`} x1={0} y1={i * 5} x2={lotW} y2={i * 5} stroke="#eaecef" strokeWidth={0.3} />
+              ))}
+
+              {/* Features */}
+              <AnimatePresence>
+                {layout?.features?.map((f) => (
+                  <motion.g
+                    key={`${f.type}-${f.x}-${f.y}-${f.width}-${f.height}`}
+                    initial={{ opacity: 0, scale: 0.98 }}
+                    animate={{ opacity: 1, scale: 1 }}
+                    exit={{ opacity: 0, scale: 0.98 }}
+                  >
+                    <rect
+                      x={f.x}
+                      y={f.y}
+                      width={f.width}
+                      height={f.height}
+                      rx={1.5}
+                      ry={1.5}
+                      fill={colorForType(f.type)}
+                      opacity={0.2}
+                      stroke={colorForType(f.type)}
+                      strokeWidth={0.8}
+                    />
+                    <text x={f.x + 2} y={f.y + 6} fontSize={3} fill="#334155">
+                      {f.type}
+                    </text>
+                  </motion.g>
+                ))}
+              </AnimatePresence>
+            </g>
+          </svg>
+        )}
+        {!layout && !svgContent && (
           <div className="absolute inset-0 grid place-items-center text-muted-foreground text-sm">
             Provide input to generate a preview.
           </div>
@@ -644,7 +659,7 @@ export default function GenerativeLayoutUI() {
                 </div>
               </CardHeader>
               <CardContent>
-                <SVGPreview layout={layout} />
+                <SVGPreview layout={layout} svgContent={svgContent} />
               </CardContent>
             </Card>
 

@@ -4,12 +4,3 @@ python-dotenv
 requests
 pydantic
 matplotlib
-
-
-npm create vite@latest frontend -- --template react
-cd frontend
-
-npm install -D tailwindcss@3 postcss autoprefixer
-npx tailwindcss init -p
-
-

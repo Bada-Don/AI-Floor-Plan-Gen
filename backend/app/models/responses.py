@@ -1,6 +1,5 @@
-# Pydantic response models
 from pydantic import BaseModel
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Optional
 
 class Feature(BaseModel):
     type: str
@@ -8,10 +7,14 @@ class Feature(BaseModel):
     y: float
     width: float
     height: float
+    label: Optional[str] = None
+    color: Optional[str] = None
+    locked: Optional[bool] = False  # fixed pre-placement (e.g., park/pool/entrance)
 
 class LayoutResponse(BaseModel):
     lot: Dict[str, float]
     features: List[Feature]
+    svg: Optional[str] = None  # NEW: inline SVG for immediate preview
 
 class ConflictResponse(BaseModel):
     error: str

@@ -1,6 +1,6 @@
-# Pydantic request models
+# app/models/requests.py
 from pydantic import BaseModel
-from typing import Optional, Dict, Any
+from typing import Optional, Dict, Any, Literal
 
 class FreeformInput(BaseModel):
     text: str
@@ -14,8 +14,8 @@ class ChangeEvent(BaseModel):
     changes: Dict[str, Any]
 
 class GenerateLayoutRequest(BaseModel):
-    mode: str  # "freeform" or "structured"
-    freeform: Optional[FreeformInput]
-    structured: Optional[StructuredInput]
-    sessionId: Optional[str]
-    changeEvent: Optional[ChangeEvent]
+    mode: Literal["freeform", "structured", "change"]
+    freeform: Optional[FreeformInput] = None
+    structured: Optional[StructuredInput] = None
+    sessionId: Optional[str] = None
+    changeEvent: Optional[ChangeEvent] = None

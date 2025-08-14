@@ -35,6 +35,7 @@ export interface LayoutFeature {
 export interface LayoutResponse {
   lot: { width: number; height: number }
   features: LayoutFeature[]
+  svg?: string
 }
 
 export interface ConflictResponse {
