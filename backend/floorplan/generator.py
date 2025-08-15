@@ -1,11 +1,14 @@
 # floorplan/generator.py
-import math, random, io, base64
+import math, random, io, base64, itertools # <-- itertools should already be there
 import matplotlib
 matplotlib.use("Agg") # Use non-GUI backend for server environment
 import matplotlib.pyplot as plt
 import matplotlib.patches as patches
 from collections import deque, namedtuple
 from typing import Dict, Any, List, Tuple
+from shapely.geometry import Polygon
+from shapely.ops import unary_union
+
 
 # === Architectural Rules & Constants ===
 MUST_BE_ADJACENT = {"kitchen": "living"}
@@ -47,6 +50,7 @@ class FloorPlanGenerator:
         self.cell_ft = cell_ft; self.placed = []; self.verbose = verbose
         self.occupied = [[None]*self.grid.rows for _ in range(self.grid.cols)]
         self.grid_spacing_cells = ft_to_cells(GRID_SPACING_FT, self.cell_ft)
+        self.openings = []
 
     # --- Core Utilities ---
     def get_rooms_by_type(self, rtype): return [r for r in self.placed if r.type == rtype]
@@ -75,6 +79,56 @@ class FloorPlanGenerator:
             for dx, dy in [(1,0),(-1,0),(0,1),(0,-1)]:
                 if (x+dx, y+dy) in r1_cells: shared_len += 1
         return shared_len
+
+    # --- NEW (v3.4): Rule-Based Post-Processing for Architectural Details ---
+    def _create_openings(self):
+        """
+        Analyzes the final layout to identify and create doors/openings
+        based on a set of architectural rules.
+        """
+        self.openings = []
+        door_width_cells = ft_to_cells(3, self.cell_ft)
+        
+        # Define connection rules
+        connection_rules = {
+            ('corridor', 'bedroom'),
+            ('corridor', 'master'),
+            ('corridor', 'living'),
+            ('living', 'kitchen'),
+            ('master', 'master_bathroom'), # Special rule for master suite
+            ('bedroom', 'bathroom'), # For en-suite baths
+        }
+
+        # Check all pairs of rooms for adjacency and apply rules
+        for room1, room2 in itertools.combinations(self.placed, 2):
+            # Find shared wall segment
+            ix1 = max(room1.x, room2.x)
+            iy1 = max(room1.y, room2.y)
+            ix2 = min(room1.x + room1.w, room2.x + room2.w)
+            iy2 = min(room1.y + room1.h, room2.y + room2.h)
+            
+            shared_len = max(0, ix2 - ix1) + max(0, iy2 - iy1)
+
+            if shared_len >= door_width_cells:
+                # Canonicalize the type pair for rule checking
+                room_types = tuple(sorted((room1.type, room2.type)))
+                
+                if room_types in connection_rules:
+                    # Special check: Don't connect kitchen to corridor if it's already well-connected to living
+                    if room_types == ('corridor', 'kitchen'):
+                        kitchen_ref = room1 if room1.type == 'kitchen' else room2
+                        has_living_connection = any(
+                            self.calculate_shared_wall_length(kitchen_ref, lr) >= door_width_cells 
+                            for lr in self.get_rooms_by_type('living')
+                        )
+                        if has_living_connection:
+                            continue # Skip adding a redundant corridor door
+
+                    # Add the opening
+                    mid_x = (ix1 + ix2) / 2
+                    mid_y = (iy1 + iy2) / 2
+                    orientation = 'h' if (ix2 - ix1) > (iy2 - iy1) else 'v'
+                    self.openings.append({'midpoint': (mid_x, mid_y), 'orientation': orientation})
 
     # --- NEW: Multi-Factor Scoring Engine with Proximity ---
     def _score_proximity(self, x, y, w, h, anchors):
@@ -191,22 +245,65 @@ class FloorPlanGenerator:
         for spec in bathroom_specs:
             self._find_and_place_room(spec, meta, [a for a in private_anchors if a])
 
+        self._create_openings()
+
         message = "Layout generated successfully."
         return True, message, meta
 
     def render_base_64(self, title="Floor Plan"):
-        # (Renamed for consistency, but logic is the same)
-        cols, rows = self.grid.cols, self.grid.rows; fig, ax = plt.subplots(figsize=(max(8, cols/5), max(8, rows/5)))
-        colors = {"public":"#98FB98","private":"#87CEEB","service":"#FFA07A", "storage":"#DDDDDD"}
-        for r in self.placed:
-            rect = patches.Rectangle((r.x,r.y),r.w,r.h,facecolor=colors.get(r.zone,"#DDD"),edgecolor="black",linewidth=1.1, alpha=0.8)
-            ax.add_patch(rect); ax.text(r.x+r.w/2,r.y+r.h/2,f"{r.name}\n({r.area_sq_ft} sqft)",ha="center",va="center",fontsize=7,wrap=True)
-        ent = next((r for r in self.placed if r.type=='entrance'), None)
-        if ent: ax.plot(ent.center()[0], ent.center()[1], 'o', color="red", markersize=8)
-        ax.set_xlim(-1,cols+1); ax.set_ylim(-1,rows+1); ax.set_aspect("equal"); ax.axis("off"); ax.set_title(title,fontsize=14,fontweight="bold"); plt.gca().invert_yaxis()
-        buf = io.BytesIO(); plt.savefig(buf, format='png', bbox_inches='tight'); plt.close(fig); buf.seek(0)
-        return base64.b64encode(buf.getvalue()).decode('utf-8')
+        cols, rows = self.grid.cols, self.grid.rows
+        fig, ax = plt.subplots(figsize=(max(8, cols / 5), max(8, rows / 5)))
+        colors = {"public": "#98FB98", "private": "#87CEEB", "service": "#FFA07A", "storage": "#DDDDDD"}
 
+        # 1. Draw room rectangles and labels
+        for r in self.placed:
+            # Use a slightly transparent edgecolor to de-emphasize internal walls
+            rect = patches.Rectangle((r.x, r.y), r.w, r.h, facecolor=colors.get(r.zone, "#DDD"), edgecolor="gray", linewidth=0.8, alpha=0.9)
+            ax.add_patch(rect)
+            ax.text(r.x + r.w / 2, r.y + r.h / 2, f"{r.name}\n({r.area_sq_ft} sqft)", ha="center", va="center", fontsize=7, wrap=True)
+
+        # 2. Draw calculated openings
+        door_width_cells = ft_to_cells(3, self.cell_ft)
+        for opening in self.openings:
+            mx, my = opening['midpoint']
+            if opening['orientation'] == 'h':
+                p1, p2 = (mx - door_width_cells / 2, my), (mx + door_width_cells / 2, my)
+            else: # Vertical
+                p1, p2 = (mx, my - door_width_cells / 2), (mx, my + door_width_cells / 2)
+            ax.plot([p1[0], p2[0]], [p1[1], p2[1]], color='white', linewidth=3.5, zorder=5)
+
+        # 3. --- NEW (v3.4): Calculate and draw a perfect exterior boundary using Shapely ---
+        polygons = []
+        for r in self.placed:
+            # Create a shapely Polygon for each room
+            polygons.append(Polygon([(r.x, r.y), (r.x + r.w, r.y), (r.x + r.w, r.y + r.h), (r.x, r.y + r.h)]))
+        
+        # Merge all polygons into a single shape
+        merged_shape = unary_union(polygons)
+
+        # Plot the exterior of the merged shape
+        if hasattr(merged_shape, 'exterior'):
+             x, y = merged_shape.exterior.xy
+             ax.plot(x, y, color='black', linewidth=3, solid_capstyle='round', zorder=10)
+        # Handle cases where the layout might be disjoint (MultiPolygon)
+        if hasattr(merged_shape, 'geoms'):
+            for geom in merged_shape.geoms:
+                x, y = geom.exterior.xy
+                ax.plot(x, y, color='black', linewidth=3, solid_capstyle='round', zorder=10)
+
+        # Final plot setup
+        ent = next((r for r in self.placed if r.type == 'entrance'), None)
+        if ent: ax.plot(ent.center()[0], ent.center()[1], 'o', color="red", markersize=8)
+        ax.set_xlim(-2, cols + 2); ax.set_ylim(-2, rows + 2)
+        ax.set_aspect("equal"); ax.axis("off")
+        ax.set_title(title, fontsize=14, fontweight="bold")
+        plt.gca().invert_yaxis()
+        buf = io.BytesIO()
+        plt.savefig(buf, format='png', bbox_inches='tight')
+        plt.close(fig)
+        buf.seek(0)
+        return base64.b64encode(buf.getvalue()).decode('utf-8')
+    
 # --- Adapter Function (NEW INTELLIGENT SCALING LOGIC) ---
 def generate_layout_from_constraints(constraints: Dict[str, Any]) -> Tuple[Dict[str, Any], Any]:
     lot = constraints.get("plot",{}); w,h = lot.get("width",0), lot.get("height",0)
