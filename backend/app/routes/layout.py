@@ -1,65 +1,64 @@
-from fastapi import APIRouter
+# app/routes/layout.py
+
+from fastapi import APIRouter, HTTPException
 from app.models.requests import GenerateLayoutRequest
-from app.models.responses import LayoutResponse, ConflictResponse
+from app.models.responses import LayoutResponse, Feature # No need to import ConflictResponse here
+from floorplan.generator import generate_layout_from_constraints, PlacedRoom
 from app.services.nlu_processor import parse_freeform_to_constraints
-from app.services.generator import generate_layout
-from app.services.renderer import render_svg
 import traceback
-import json
 
 router = APIRouter()
 
-@router.post("/generate-layout", response_model=None)
-def generate_layout_route(req: GenerateLayoutRequest):
+# We only define the success model here. Errors are handled by exceptions.
+@router.post("/generate-floorplan", response_model=LayoutResponse)
+async def generate_floorplan(req: GenerateLayoutRequest): # Route must be asynchronous
     try:
-        print("\n=== Incoming Request ===")
-        print(json.dumps(req.dict(), indent=2))
-
-        # 1) Build constraints
         constraints = {}
+        # === AI INTEGRATION ===
         if req.mode == "freeform" and req.freeform:
-            print("[NLU] Parsing freeform input...")
-            constraints = parse_freeform_to_constraints(req.freeform.text)
+            # CORRECTED: Call the async function with 'await'
+            constraints = await parse_freeform_to_constraints(req.freeform.text)
+            if "error" in constraints:
+                # Use HTTPException to return a clean error response
+                raise HTTPException(status_code=400, detail=f"AI Processor Error: {constraints.get('details', 'Failed to understand request.')}")
+
         elif req.mode == "structured" and req.structured:
-            print("[NLU] Using structured constraints directly...")
             constraints = req.structured.constraints
-        elif req.changeEvent:
-            print("[NLU] Processing change event...")
-            constraints = req.structured.constraints if req.structured else {}
         else:
-            print("[ERROR] Invalid request payload")
-            return ConflictResponse(
-                error="Invalid request",
-                conflicts=["No input provided"],
-                suggestions=["Send freeform text or structured constraints"]
-            )
+            raise HTTPException(status_code=400, detail="Invalid request payload. Mode must be 'freeform' or 'structured'.")
 
-        print("\n[Constraints] Built constraints:")
-        print(json.dumps(constraints, indent=2))
-
-        # 2) Generate layout
-        print("\n[Generator] Generating layout...")
-        result = generate_layout(constraints)
-        print("[Generator] Raw result:", result)
+        # Call the generator with the determined constraints
+        result, placed_rooms = generate_layout_from_constraints(constraints)
 
         if "error" in result:
-            print("[Generator] Error in generation, returning conflict response.")
-            return ConflictResponse(**result)
+            # CORRECTED: Raise an exception for generator errors
+            raise HTTPException(status_code=422, detail=result["error"])
 
-        # 3) Render SVG
-        print("\n[Renderer] Rendering SVG...")
-        svg = render_svg(result)
-        result["svg"] = svg
-        print("[Renderer] SVG generated successfully.")
+        # Convert PlacedRoom objects to the Pydantic Feature model
+        cell_ft = 2
+        features_list_ft = [
+            Feature(
+                type=pr.type,
+                x=pr.x * cell_ft,
+                y=pr.y * cell_ft,
+                width=pr.w * cell_ft,
+                height=pr.h * cell_ft,
+                label=pr.name
+            ) for pr in placed_rooms
+        ]
 
-        print("\n=== Response Sent ===")
-        return LayoutResponse(**result)
-
-    except Exception as e:
-        print("\n[Exception] Something went wrong during generation:")
-        traceback.print_exc()
-        return ConflictResponse(
-            error="Internal server error",
-            conflicts=[str(e)],
-            suggestions=["Check server logs for more details"]
+        # Return the successful layout response
+        return LayoutResponse(
+            lot=result["lot"],
+            features=features_list_ft,
+            image_base64=result["image_base64"]
         )
+
+    except HTTPException as http_exc:
+        # Re-raise HTTPException so FastAPI can handle it
+        raise http_exc
+    except Exception as e:
+        print(f"An unexpected error occurred: {e}")
+        traceback.print_exc()
+        # CORRECTED: Raise a generic 500 error for unexpected issues
+        raise HTTPException(status_code=500, detail=f"An internal server error occurred: {str(e)}")

@@ -14,7 +14,10 @@ class Feature(BaseModel):
 class LayoutResponse(BaseModel):
     lot: Dict[str, float]
     features: List[Feature]
-    svg: Optional[str] = None  # NEW: inline SVG for immediate preview
+    image_base64: Optional[str] = None  # Add this field
+    status: Optional[str] = None
+    message: Optional[str] = None
+
 
 class ConflictResponse(BaseModel):
     error: str

@@ -12,7 +12,7 @@ export default defineConfig({
   },
   server: {
     proxy: {
-      '/generate-layout': 'http://127.0.0.1:8000',
+      '/generate-floorplan': 'http://127.0.0.1:8000',
     },
   },
 })
