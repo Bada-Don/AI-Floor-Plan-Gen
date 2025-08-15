@@ -50,9 +50,7 @@ export default function GenerativeLayoutUI() {
   const [conflicts, setConflicts] = useState<string[]>([]);
 
   // User's natural language input
-  const [freeform, setFreeform] = useState(
-    "A 30 by 40 plot with 3 bedrooms and 2 bathrooms. The kitchen should be near the living room."
-  );
+  const [freeform, setFreeform] = useState("");
 
   // The final layout response from the backend
   const [layout, setLayout] = useState<LayoutResponse | null>(null);
@@ -99,13 +97,6 @@ export default function GenerativeLayoutUI() {
 
   // Use a debounced function for auto-generation
   const debouncedGenerate = useMemo(() => debounce(generateLayout), []);
-
-  // Effect to trigger generation when freeform text changes
-  useEffect(() => {
-    if (freeform.trim()) {
-      debouncedGenerate(freeform);
-    }
-  }, [freeform, debouncedGenerate]);
 
 
   // ---------- Subcomponents ----------

@@ -6,6 +6,7 @@ from app.models.responses import LayoutResponse, Feature # No need to import Con
 from floorplan.generator import generate_layout_from_constraints, PlacedRoom
 from app.services.nlu_processor import parse_freeform_to_constraints
 import traceback
+import logging
 
 router = APIRouter()
 
@@ -26,6 +27,8 @@ async def generate_floorplan(req: GenerateLayoutRequest): # Route must be asynch
             constraints = req.structured.constraints
         else:
             raise HTTPException(status_code=400, detail="Invalid request payload. Mode must be 'freeform' or 'structured'.")
+
+        logging.info(f"Received constraints: {constraints}")
 
         # Call the generator with the determined constraints
         result, placed_rooms = generate_layout_from_constraints(constraints)

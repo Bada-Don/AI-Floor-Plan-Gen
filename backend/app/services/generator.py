@@ -232,18 +232,12 @@ def _place_private_rooms(core_rect, hallway, room_counts: Dict[str, int]) -> Lis
     return placed
 
 def _count_rooms(constraints: Dict[str, Any]) -> Dict[str, int]:
-    counts = {"bedroom": 0, "bathroom": 0, "kitchen": 1, "living": 1}
-    for r in (constraints.get("rooms") or []):
-        t = r.get("type","").lower()
-        c = int(r.get("count", 1))
-        if "bed" in t:
-            counts["bedroom"] = c
-        elif "bath" in t:
-            counts["bathroom"] = c
-        elif "kitchen" in t:
-            counts["kitchen"] = c
-        elif "living" in t or "hall" in t:
-            counts["living"] = 1
+    counts = {}
+    for room in constraints.get("rooms", []):
+        room_type = room.get("type")
+        count = room.get("count", 0)
+        if room_type and count > 0:
+            counts[room_type] = counts.get(room_type, 0) + count
     return counts
 
 def _fixed_features_from_constraints(constraints: Dict[str, Any]) -> List[Dict[str, Any]]:
@@ -264,14 +258,6 @@ def _fixed_features_from_constraints(constraints: Dict[str, Any]) -> List[Dict[s
     return out
 
 def generate_layout(constraints: Dict[str, Any]) -> Dict[str, Any]:
-    ok, errs = validate_constraints(constraints)
-    if not ok:
-        return {
-            "error": "Constraint validation failed",
-            "conflicts": errs,
-            "suggestions": ["Check plot dimensions", "Verify fixed feature sizes"]
-        }
-
     lot = constraints.get("plot") or constraints.get("lot")
     W, H = float(lot["width"]), float(lot["height"])
     layout = {"lot": {"width": W, "height": H}, "features": [], "meta": {"bathroom_privacy_ft": 12.0}}
