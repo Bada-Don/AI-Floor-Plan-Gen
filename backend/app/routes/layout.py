@@ -28,7 +28,8 @@ async def generate_floorplan(req: GenerateLayoutRequest): # Route must be asynch
         else:
             raise HTTPException(status_code=400, detail="Invalid request payload. Mode must be 'freeform' or 'structured'.")
 
-        logging.info(f"Received constraints: {constraints}")
+        print(f"Received constraints: {constraints}")
+        print(f"Type of constraints: {type(constraints)}")
 
         # Call the generator with the determined constraints
         result, placed_rooms = generate_layout_from_constraints(constraints)
@@ -54,7 +55,7 @@ async def generate_floorplan(req: GenerateLayoutRequest): # Route must be asynch
         return LayoutResponse(
             lot=result["lot"],
             features=features_list_ft,
-            image_base64=result["image_base64"]
+            image_base64=result["image_base_64"]
         )
 
     except HTTPException as http_exc:

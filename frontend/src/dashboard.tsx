@@ -115,7 +115,7 @@ export default function GenerativeLayoutUI() {
           <img
             src={`data:image/png;base64,${layout.image_base64}`}
             alt="Generated Floor Plan"
-            className=""
+            className="object-scale-down"
           />
         ) : (
           !loading && <div className="text-slate-500 text-sm">
