@@ -1,36 +1,36 @@
 # floorplan/generator.py
-import math, random, io, base64, itertools # <-- itertools should already be there
+import math, random, io, base64, itertools, copy, heapq
 import matplotlib
-matplotlib.use("Agg") # Use non-GUI backend for server environment
+matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import matplotlib.patches as patches
 from collections import deque, namedtuple
 from typing import Dict, Any, List, Tuple
 from shapely.geometry import Polygon
 from shapely.ops import unary_union
+import networkx as nx # --- PHASE 2: Required for relationship graph ---
 
 
-# === Architectural Rules & Constants ===
-MUST_BE_ADJACENT = {"kitchen": "living"}
-MUST_NOT_BE_ADJACENT = {"master": ["living", "kitchen"], "bedroom": ["living", "kitchen"]}
-# NEW: Add Proximity to scoring weights
-WEIGHT_ADJACENCY = 20.0
-WEIGHT_PROXIMITY = 15.0 # NEW: Encourages tight packing
+# === Architectural Rules & Constants (The Graph will now handle this) ===
+WEIGHT_ADJACENCY = 50.0  # Increased weight as it's now more critical
+WEIGHT_PROXIMITY = 10.0
 WEIGHT_ENVIRONMENTAL = 10.0
-WEIGHT_STRUCTURAL = 8.0
 WEIGHT_PROPORTIONS = 5.0
+WEIGHT_RECTANGULARITY = 18.0
 GRID_SPACING_FT = 4
 DEFAULT_MIN_SIZES = { "bedroom": (8, 9), "master": (12, 12), "bathroom": (5, 7), "kitchen": (8, 10), "living": (10, 12), "entrance": (5, 5), "corridor": (4, 20)}
 MAX_AREA_COVERAGE_RATIO = 0.80
 
-# === Core Definitions (largely unchanged) ===
+# === Core Definitions (Unchanged) ===
 Cell = namedtuple("Cell", ["x","y"])
 class Grid:
     def __init__(self, width_ft, height_ft, cell_ft=1): self.cell, self.cols, self.rows = cell_ft, int(width_ft // cell_ft), int(height_ft // cell_ft)
 class RoomSpec:
     def __init__(self, name, room_type, area_ft2=None, prefs=None, priority=5): self.name, self.type, self.area, self.prefs, self.priority = name, room_type, area_ft2, prefs or {}, priority
 class PlacedRoom:
-    def __init__(self, spec:RoomSpec, x, y, w, h, zone="private"): self.spec, self.name, self.type, self.x, self.y, self.w, self.h, self.zone = spec, spec.name, spec.type, x, y, w, h, zone
+    def __init__(self, spec:RoomSpec, x, y, w, h, zone="private", fixed=False): # Added 'fixed' attribute
+        self.spec, self.name, self.type, self.x, self.y, self.w, self.h, self.zone = spec, spec.name, spec.type, x, y, w, h, zone
+        self.fixed = fixed # --- PHASE 2: To lock corridors in place
     def cells(self):
         for i in range(self.x, self.x+self.w):
             for j in range(self.y, self.y+self.h): yield (i,j)
@@ -43,8 +43,6 @@ def ft_to_cells(dim_ft, cell_ft=1): return max(1, int(round(dim_ft / cell_ft)))
 def area_to_wh_cells(area_ft2, cell_ft=1, preferred_aspect=1.2):
     cells = max(1, int(round(area_ft2/(cell_ft*cell_ft)))); h = max(1, int(round(math.sqrt(cells/preferred_aspect)))); w = max(1, int(round(cells/h))); return w, h
 
-# === Floor Plan Generator v3.3 (Cohesive Zones & Intelligent Scaling) ===
-# This version introduces a more cohesive zone system, intelligent scaling of room sizes, and a more strategic placement algorithm.
 class FloorPlanGenerator:
     def __init__(self, plot_w_ft, plot_h_ft, cell_ft=1, verbose=False):
         self.grid = Grid(plot_w_ft, plot_h_ft, cell_ft)
@@ -53,209 +51,283 @@ class FloorPlanGenerator:
         self.grid_spacing_cells = ft_to_cells(GRID_SPACING_FT, self.cell_ft)
         self.openings = []
 
-    # --- Core Utilities (Unchanged) ---
-    def get_rooms_by_type(self, rtype): return [r for r in self.placed if r.type == rtype]
+    # --- PHASE 2: A* Pathfinding for Circulation ---
+    def _heuristic(self, a, b):
+        return abs(a[0] - b[0]) + abs(a[1] - b[1])
+
+    def _a_star_pathfinding(self, start, goal, obstacles):
+        """Finds a path on the grid from start to goal, avoiding obstacles."""
+        neighbors = [(0,1),(0,-1),(1,0),(-1,0)]
+        close_set = set()
+        came_from = {}
+        gscore = {start:0}
+        fscore = {start:self._heuristic(start, goal)}
+        oheap = []
+        heapq.heappush(oheap, (fscore[start], start))
+        
+        while oheap:
+            current = heapq.heappop(oheap)[1]
+            if current == goal:
+                data = []
+                while current in came_from:
+                    data.append(current)
+                    current = came_from[current]
+                return data
+            
+            close_set.add(current)
+            for i, j in neighbors:
+                neighbor = current[0] + i, current[1] + j            
+                if 0 <= neighbor[0] < self.grid.cols and 0 <= neighbor[1] < self.grid.rows:
+                    if neighbor in obstacles or neighbor in close_set:
+                        continue
+                else:
+                    continue
+                    
+                tentative_g_score = gscore[current] + 1
+                
+                if tentative_g_score < gscore.get(neighbor, 0) or neighbor not in [i[1]for i in oheap]:
+                    came_from[neighbor] = current
+                    gscore[neighbor] = tentative_g_score
+                    fscore[neighbor] = tentative_g_score + self._heuristic(neighbor, goal)
+                    heapq.heappush(oheap, (fscore[neighbor], neighbor))
+        return [] # No path found
+
+    # --- Core Utilities (Largely Unchanged) ---
+    def get_rooms_by_type(self, rtype, layout: List[PlacedRoom]):
+        return [r for r in layout if r.type == rtype]
     def get_room_zone(self, rtype):
         if rtype in ("living", "entrance", "corridor"): return "public"
         if rtype == "kitchen": return "service"
         return "private"
-    def check_space_free(self, x,y,w,h):
-        if x<0 or y<0 or x+w>self.grid.cols or y+h>self.grid.rows: return False
-        for i in range(x,x+w):
-            for j in range(y,y+h):
-                if self.occupied[i][j] is not None: return False
-        return True
-    def place_room(self, spec, x,y,w,h, zone, placed_area):
-        spec.prefs['placed_area'] = int(placed_area)
-        pr = PlacedRoom(spec, x,y,w,h, zone=zone)
-        self.placed.append(pr)
-        for i in range(x, x + w):
-            for j in range(y, y + h):
-                self.occupied[i][j] = pr.name
-        return pr
     def calculate_shared_wall_length(self, room1, room2):
         if not room1 or not room2: return 0
         ix1, iy1 = max(room1.x, room2.x), max(room1.y, room2.y)
         ix2, iy2 = min(room1.x + room1.w, room2.x + room2.w), min(room1.y + room1.h, room2.y + room2.h)
         return max(0, ix2 - ix1) + max(0, iy2 - iy1)
 
-    # --- v3.5: Multi-Factor Scoring Engine with Rectangularity ---
-    def _score_rectangularity(self, candidate_room):
-        """Scores how well the new room makes the total layout a solid rectangle."""
-        if not self.placed: return 0
+    # --- Simulated Annealing Core (Phase 1) ---
+    def _get_random_neighbor_state(self, current_placed: List[PlacedRoom]) -> List[PlacedRoom] | None:
+        new_placed = copy.deepcopy(current_placed)
+        if not new_placed: return None
+
+        # --- PHASE 2: Ensure we don't try to move 'fixed' rooms like corridors ---
+        movable_rooms = [r for r in new_placed if not r.fixed]
+        if len(movable_rooms) < 2: return None
+
+        room_to_modify = random.choice(movable_rooms)
+        anchor_room = random.choice([r for r in new_placed if r is not room_to_modify])
         
-        all_rooms = self.placed + [candidate_room]
-        min_x = min(r.x for r in all_rooms)
-        min_y = min(r.y for r in all_rooms)
-        max_x = max(r.x + r.w for r in all_rooms)
-        max_y = max(r.y + r.h for r in all_rooms)
+        candidates = []
+        ax, ay, aw, ah = anchor_room.bbox()
+        w, h = room_to_modify.w, room_to_modify.h
         
+        for i in range(-w + 1, aw):
+            candidates.append((ax + i, ay - h)); candidates.append((ax + i, ay + ah))
+        for j in range(-h + 1, ah):
+            candidates.append((ax - w, ay + j)); candidates.append((ax + aw, ay + j))
+        
+        random.shuffle(candidates)
+        for x, y in candidates[:30]:
+            if self._check_space_free_for_move(x, y, w, h, room_to_modify, new_placed):
+                room_to_modify.x, room_to_modify.y = x, y
+                return new_placed
+        return None
+
+    def _is_layout_valid(self, layout: List[PlacedRoom]) -> bool:
+        for i, room in enumerate(layout):
+            if room.x < 0 or room.y < 0 or room.x + room.w > self.grid.cols or room.y + room.h > self.grid.rows: return False
+            for other_room in layout[i+1:]:
+                if (room.x < other_room.x + other_room.w and room.x + room.w > other_room.x and
+                    room.y < other_room.y + other_room.h and room.y + room.h > other_room.y): return False
+        return True
+
+    def _check_space_free_for_move(self, x, y, w, h, moving_room, all_rooms):
+        if x<0 or y<0 or x+w>self.grid.cols or y+h>self.grid.rows: return False
+        for room in all_rooms:
+            if room is moving_room: continue
+            if not (x + w <= room.x or x >= room.x + room.w or y + h <= room.y or y >= room.y + room.h): return False
+        return True
+
+    # --- SCORING ENGINE (UPGRADED FOR PHASE 2) ---
+    def _evaluate_layout_score(self, layout: List[PlacedRoom], meta) -> float:
+        if not self._is_layout_valid(layout): return -1e12
+
+        total_score = 0
+        
+        # 1. Individual Room Scores (Proportions, Environment)
+        for room in layout:
+            total_score += self.score_room_properties(room)
+        
+        # 2. Global Scores (Rectangularity, Proximity)
+        total_score += self._score_rectangularity(layout) * WEIGHT_RECTANGULARITY
+        total_score += self._score_proximity(layout) * WEIGHT_PROXIMITY
+
+        # 3. --- PHASE 2: Graph-Based Adjacency Score ---
+        adj_graph = meta.get("adjacency_graph")
+        if adj_graph:
+            for r1, r2, data in adj_graph.edges(data=True):
+                # Find the PlacedRoom objects corresponding to the names
+                room1 = next((r for r in layout if r.name == r1), None)
+                room2 = next((r for r in layout if r.name == r2), None)
+                if not room1 or not room2: continue
+                
+                shared_len = self.calculate_shared_wall_length(room1, room2)
+                rule = data.get('rule')
+                
+                if rule == 'must_be_adjacent':
+                    if shared_len < ft_to_cells(4): total_score -= 10000 # Heavy penalty
+                    else: total_score += 1000 # Reward
+                elif rule == 'must_not_be_adjacent':
+                    if shared_len > 0: total_score -= 10000 # Heavy penalty
+
+        return total_score
+    
+    def _score_rectangularity(self, all_rooms: List[PlacedRoom]):
+        if not all_rooms: return 0
+        min_x = min(r.x for r in all_rooms); min_y = min(r.y for r in all_rooms)
+        max_x = max(r.x + r.w for r in all_rooms); max_y = max(r.y + r.h for r in all_rooms)
         bbox_area = (max_x - min_x) * (max_y - min_y)
-        total_room_area = sum(r.w * r.h for r in all_rooms)
-        
-        # Ratio will be 1.0 for a perfect rectangle, less for jagged shapes.
-        return (total_room_area / bbox_area) * 10.0 # Multiply by 10 to give it weight
+        if bbox_area == 0: return 0
+        return (sum(r.w * r.h for r in all_rooms) / bbox_area) * 10.0
 
-    def score_candidate(self, spec, x, y, w, h, meta, anchors):
-        temp_room = PlacedRoom(spec, x, y, w, h, self.get_room_zone(spec.type))
-        adj_score = 0
-        if spec.type in MUST_NOT_BE_ADJACENT:
-            for other_type in MUST_NOT_BE_ADJACENT[spec.type]:
-                for other_room in self.get_rooms_by_type(other_type):
-                    if self.calculate_shared_wall_length(temp_room, other_room) > 0: return -1e9
-        if spec.type == 'kitchen':
-            living_rooms = self.get_rooms_by_type('living')
-            if living_rooms and not any(self.calculate_shared_wall_length(temp_room, lr) >= ft_to_cells(4) for lr in living_rooms):
-                return -1e9
-            adj_score += 100
+    def _score_proximity(self, layout: List[PlacedRoom]):
+        """Scores how tightly packed the layout is."""
+        if len(layout) < 2: return 0
+        cx = sum(r.center()[0] for r in layout) / len(layout)
+        cy = sum(r.center()[1] for r in layout) / len(layout)
+        # Sum of squared distances from the centroid
+        prox_score = sum((r.center()[0] - cx)**2 + (r.center()[1] - cy)**2 for r in layout)
+        return -math.sqrt(prox_score) # Negative because we want to minimize distance
 
-        # Calculate all scoring components
-        prox_score = -math.sqrt((x + w/2 - (sum(a.center()[0] for a in anchors)/len(anchors)))**2 + (y + h/2 - (sum(a.center()[1] for a in anchors)/len(anchors)))**2) if anchors else 0
-        rect_score = self._score_rectangularity(temp_room) # NEW
-        env_score = 0
-        if spec.type in ("living", "master") and (y + h >= self.grid.rows): env_score += w * 1.5
-        aspect = max(w,h) / max(1, min(w,h)); prop_score = -10 * (aspect - 2.0) if aspect > 2.0 else 0
+    def score_room_properties(self, room: PlacedRoom):
+        score = 0
+        # Environmental Score
+        if room.spec.type in ("living", "master") and (room.y + room.h >= self.grid.rows):
+            score += room.w * 1.5 * WEIGHT_ENVIRONMENTAL
+        # Proportion Score
+        aspect = max(room.w, room.h) / max(1, min(room.w, room.h))
+        if aspect > 2.5: score += -10 * (aspect - 2.5) * WEIGHT_PROPORTIONS
+        return score
 
-        # Define new weights including rectangularity
-        WEIGHT_RECTANGULARITY = 18.0 
-        return (adj_score * 20.0 + prox_score * 15.0 + rect_score * WEIGHT_RECTANGULARITY + env_score * 10.0 + prop_score * 5.0)
-
-    # --- v3.5: Strategic Placement (Simplified back to basics as scoring is now smarter) ---
-    def _find_placement_candidates(self, w, h, anchors):
-        # This function remains the same as the previous working version
-        all_candidates = set()
-        for anchor_room in anchors:
-            if not anchor_room: continue
-            ax, ay, aw, ah = anchor_room.bbox()
-            for i in range(-w + 1, aw):
-                all_candidates.add((ax + i, ay - h)); all_candidates.add((ax + i, ay + ah))
-            for j in range(-h + 1, ah):
-                all_candidates.add((ax - w, ay + j)); all_candidates.add((ax + aw, ay + j))
-        valid_candidates = [(x, y) for x, y in all_candidates if self.check_space_free(x, y, w, h)]
-        if not valid_candidates: # Fallback
-            for x in range(0, self.grid.cols - w + 1, self.grid_spacing_cells or 4):
-                 for y in range(0, self.grid.rows - h + 1, self.grid_spacing_cells or 4):
-                     if self.check_space_free(x, y, w, h): valid_candidates.append((x,y))
-        return valid_candidates
-
-    def _find_and_place_room(self, spec, meta, anchors):
-        w, h = area_to_wh_cells(spec.area, self.cell_ft)
-        best_placement = None
-        max_score = -1e9
-
-        for rot_w, rot_h in [(w, h), (h, w)]:
-            candidates = self._find_placement_candidates(rot_w, rot_h, anchors)
-            if not candidates: continue
-            
-            for x, y in candidates:
-                score = self.score_candidate(spec, x, y, rot_w, rot_h, meta, anchors)
-                if score > max_score:
-                    max_score = score
-                    best_placement = (x, y, rot_w, rot_h)
-
-        if best_placement and max_score > -1e8:
-            x, y, w_best, h_best = best_placement
-            self.place_room(spec, x, y, w_best, h_best, zone=self.get_room_zone(spec.type), placed_area=w_best*h_best*self.cell_ft**2)
-            return True
-        
-        print(f"Error: Failed to find a suitable placement for room: {spec.name}")
-        return False
-
-    # --- v3.5: Main Generation Method (Updated room ordering) ---
+    # === GENERATE METHOD (FIXED) ===
     def generate(self, specs, meta):
-        # 1. Place Entrance & Corridor
-        entrance_spec = next((s for s in specs if s.type=="entrance"), None)
+        # --- STEP 1: Place Fixed Rooms (Circulation Spine) ---
+        initial_layout = []
+        
+        # Place Entrance
+        entrance_spec = next((s for s in specs if s.type == 'entrance'), None)
         if entrance_spec:
             ew, eh = area_to_wh_cells(entrance_spec.area, self.cell_ft)
-            ex = self.grid.cols // 2 - ew // 2; ey = self.grid.rows - eh
-            self.place_room(entrance_spec, ex, ey, ew, eh, "public", ew*eh*self.cell_ft**2)
+            ex, ey = self.grid.cols // 2 - ew // 2, self.grid.rows - eh
+            entrance_room = PlacedRoom(entrance_spec, ex, ey, ew, eh, "public", fixed=True)
+            initial_layout.append(entrance_room)
 
-        corridor_spec = next((s for s in specs if s.type=="corridor"), None)
+        # Place a single, consolidated Corridor
+        corridor_spec = next((s for s in specs if s.type == 'corridor'), None)
         if corridor_spec:
-            h_corr = ft_to_cells(DEFAULT_MIN_SIZES['corridor'][0], self.cell_ft); w_corr = self.grid.cols
-            x_corr = 0; y_corr = int(self.grid.rows * 0.45)
-            self.place_room(corridor_spec, x_corr, y_corr, w_corr, h_corr, "public", w_corr*h_corr*self.cell_ft**2)
-        
-        # 2. Sequentially place rooms with DYNAMIC anchors
-        public_specs = [s for s in specs if s.type == 'living']
-        kitchen_spec = next((s for s in specs if s.type == 'kitchen'), None)
-        private_specs = [s for s in specs if s.type in ('master', 'bedroom')]
-        bathroom_specs = [s for s in specs if 'bath' in s.type]
+            corr_h = ft_to_cells(DEFAULT_MIN_SIZES['corridor'][0], self.cell_ft)
+            corr_w = self.grid.cols - (2 * self.grid_spacing_cells) # Make it wide
+            corr_x = self.grid_spacing_cells
+            corr_y = self.grid.rows // 2 - corr_h // 2
+            corridor_room = PlacedRoom(corridor_spec, corr_x, corr_y, corr_w, corr_h, "public", fixed=True)
+            initial_layout.append(corridor_room)
 
-        # Place public rooms (living), growing the anchor list
-        public_anchors = [r for r in self.placed]
-        for spec in public_specs:
-            if self._find_and_place_room(spec, meta, public_anchors):
-                public_anchors.append(next(r for r in self.placed if r.name == spec.name))
-        
-        # Place kitchen last, anchored to all public rooms
-        if kitchen_spec:
-            self._find_and_place_room(kitchen_spec, meta, public_anchors)
+        # --- STEP 2: Initial Random Placement for Movable Rooms ---
+        movable_specs = [s for s in specs if s.type not in ('entrance', 'corridor')]
+        for spec in movable_specs:
+            w, h = area_to_wh_cells(spec.area, self.cell_ft)
+            placed_ok = False
+            for _ in range(500): # Increased attempts
+                x, y = random.randint(0, self.grid.cols - w), random.randint(0, self.grid.rows - h)
+                
+                # Check for overlap with already placed rooms
+                is_overlap = any(
+                    x < r.x + r.w and x + w > r.x and y < r.y + r.h and y + h > r.y
+                    for r in initial_layout
+                )
+                if not is_overlap:
+                    initial_layout.append(PlacedRoom(spec, x, y, w, h, zone=self.get_room_zone(spec.type)))
+                    placed_ok = True
+                    break
+            
+            if not placed_ok:
+                print(f"ERROR: Failed to randomly place room: {spec.name}. The plot may be too crowded.")
+                return False, f"Failed to perform initial random placement for {spec.name}", meta
 
-        # Place private rooms, growing the anchor list
-        private_anchors = [r for r in self.placed if r.type == 'corridor']
-        for spec in sorted(private_specs, key=lambda s: 1 if s.type == 'master' else 2):
-            if self._find_and_place_room(spec, meta, private_anchors):
-                private_anchors.append(next(r for r in self.placed if r.name == spec.name))
+        # --- STEP 3: Simulated Annealing Optimization ---
+        current_solution = initial_layout
+        current_score = self._evaluate_layout_score(current_solution, meta)
+        T_initial, T_final, alpha = 1000.0, 1.0, 0.995
+        T = T_initial
         
-        # Place bathrooms, anchoring to the complete private zone
-        for spec in bathroom_specs:
-            self._find_and_place_room(spec, meta, private_anchors)
+        print("Starting simulated annealing optimization...")
+        for i in range(5000): # Using a fixed number of iterations can be more predictable
+            if T <= T_final: break
+            
+            neighbor = self._get_random_neighbor_state(current_solution)
+            if neighbor is None: continue
 
-        # 3. Create openings and finalize
+            neighbor_score = self._evaluate_layout_score(neighbor, meta)
+            delta = neighbor_score - current_score
+            
+            if delta > 0 or random.random() < math.exp(delta / T):
+                current_solution, current_score = neighbor, neighbor_score
+            
+            T *= alpha
+            if i % 500 == 0: print(f"Iter: {i}, Temp: {T:.2f}, Score: {current_score:.2f}")
+
+        # --- STEP 4: Finalize ---
+        self.placed = current_solution
+        self.occupied = [[None]*self.grid.rows for _ in range(self.grid.cols)]
+        for r in self.placed:
+            for i in range(r.x, r.x+r.w):
+                for j in range(r.y, r.y+r.h): self.occupied[i][j] = r.name
+
         self._create_openings()
-        return True, "Layout generated successfully.", meta
+        print("Optimization complete.")
+        return True, "Layout generated successfully via optimization.", meta
 
-    # --- v3.5: Smarter, Hierarchical Opening Creation ---
+    # --- Rendering and Openings (Unchanged from Phase 1) ---
     def _create_openings(self):
         self.openings = []
         door_width = ft_to_cells(3, self.cell_ft)
-        placed_bathrooms = self.get_rooms_by_type('bathroom') + self.get_rooms_by_type('master_bathroom')
-        placed_bedrooms = self.get_rooms_by_type('bedroom') + self.get_rooms_by_type('master')
+        placed_bathrooms = self.get_rooms_by_type('bathroom', self.placed) + self.get_rooms_by_type('master_bathroom', self.placed)
+        placed_bedrooms = self.get_rooms_by_type('bedroom', self.placed) + self.get_rooms_by_type('master', self.placed)
         
-        # Function to add a door at a non-edge position
         def add_door(p1, p2, orientation):
-            # Find intersection midpoint
             ix1, iy1 = p1.x, p1.y
             ix2, iy2 = p2.x, p2.y
             shared_wall_mid_x = (max(ix1, ix2) + min(ix1 + p1.w, ix2 + p2.w)) / 2
             shared_wall_mid_y = (max(iy1, iy2) + min(iy1 + p1.h, iy2 + p2.h)) / 2
             self.openings.append({'midpoint': (shared_wall_mid_x, shared_wall_mid_y), 'orientation': orientation})
 
-        # --- Rule 1: Create En-suite doors first ---
         unassigned_baths = list(placed_bathrooms)
         for bath in placed_bathrooms:
             for bed in placed_bedrooms:
                 if self.calculate_shared_wall_length(bath, bed) >= door_width:
                     orientation = 'h' if abs(bath.y - bed.y) > abs(bath.x - bed.x) else 'v'
                     add_door(bath, bed, orientation)
-                    if bath in unassigned_baths:
-                        unassigned_baths.remove(bath) # This bath is now assigned
+                    if bath in unassigned_baths: unassigned_baths.remove(bath)
                     break 
 
-        # --- Rule 2: Connect all Bedrooms and Living rooms to Corridor ---
         corridor = next((r for r in self.placed if r.type == 'corridor'), None)
         if corridor:
-            for room in self.get_rooms_by_type('bedroom') + self.get_rooms_by_type('master') + self.get_rooms_by_type('living'):
-                if self.calculate_shared_wall_length(room, corridor) >= door_width:
-                    add_door(room, corridor, 'h') # Corridors are always horizontal
-
-        # --- Rule 3: Connect unassigned (public) bathrooms to Corridor ---
-        if corridor:
+            rooms_to_connect = (self.get_rooms_by_type('bedroom', self.placed) +
+                                self.get_rooms_by_type('master', self.placed) +
+                                self.get_rooms_by_type('living', self.placed))
+            for room in rooms_to_connect:
+                if self.calculate_shared_wall_length(room, corridor) >= door_width: add_door(room, corridor, 'h')
             for bath in unassigned_baths:
-                 if self.calculate_shared_wall_length(bath, corridor) >= door_width:
-                     add_door(bath, corridor, 'h')
+                 if self.calculate_shared_wall_length(bath, corridor) >= door_width: add_door(bath, corridor, 'h')
 
-        # --- Rule 4: Connect Kitchen to a Living Room ---
         kitchen = next((r for r in self.placed if r.type == 'kitchen'), None)
         if kitchen:
-            for living in self.get_rooms_by_type('living'):
+            for living in self.get_rooms_by_type('living', self.placed):
                 if self.calculate_shared_wall_length(kitchen, living) >= door_width:
                     orientation = 'h' if abs(kitchen.y - living.y) > abs(kitchen.x - living.x) else 'v'
                     add_door(kitchen, living, orientation)
-                    break # Only connect to one living room
-
-    # --- v3.5: Rendering (Identical to previous correct version) ---
+                    break
+    
     def render_base_64(self, title="Floor Plan"):
         # This function is correct and does not need to be changed.
         cols, rows = self.grid.cols, self.grid.rows
@@ -295,7 +367,8 @@ class FloorPlanGenerator:
         plt.gca().invert_yaxis()
         buf = io.BytesIO(); plt.savefig(buf, format='png', bbox_inches='tight'); plt.close(fig); buf.seek(0)
         return base64.b64encode(buf.getvalue()).decode('utf-8')  
-# --- Adapter Function (NEW INTELLIGENT SCALING LOGIC) ---
+
+# --- Adapter Function (UPGRADED FOR PHASE 2) ---
 def generate_layout_from_constraints(constraints: Dict[str, Any]) -> Tuple[Dict[str, Any], Any]:
     lot = constraints.get("plot",{}); w,h = lot.get("width",0), lot.get("height",0)
     if not w or not h: return {"error": "Invalid plot dimensions."}, None
@@ -303,15 +376,10 @@ def generate_layout_from_constraints(constraints: Dict[str, Any]) -> Tuple[Dict[
     specs = []
     room_constraints = constraints.get("rooms", []) or []
     
-    # --- NEW: Intelligent Scaling with Minimum Size Guarantee ---
-    plot_area = w * h
-    available_area = plot_area * MAX_AREA_COVERAGE_RATIO
-    
-    # Step 1: Create initial specs and calculate total requested area
-    initial_specs = []
-    total_requested_area = 0
+    # Intelligent Scaling Logic (Unchanged)
+    plot_area = w * h; available_area = plot_area * MAX_AREA_COVERAGE_RATIO
+    initial_specs = []; total_requested_area = 0
     for item in room_constraints:
-        # (Room type normalization logic from v3.2)
         rtype_base = item.get("type", "other").lower()
         if "liv" in rtype_base or "din" in rtype_base: rtype = "living"
         elif "master" in rtype_base and "bath" in rtype_base: rtype = "master_bathroom"
@@ -321,62 +389,68 @@ def generate_layout_from_constraints(constraints: Dict[str, Any]) -> Tuple[Dict[
         elif "kitch" in rtype_base: rtype = "kitchen"
         elif "entran" in rtype_base: rtype = "entrance"
         else: continue
-        
-        count = int(item.get("count",1))
-        total_area_for_type = item.get("area", 100 * count)
+        count = int(item.get("count",1)); total_area_for_type = item.get("area", 100 * count)
         total_requested_area += total_area_for_type
         initial_specs.append({'type': rtype, 'count': count, 'total_area': total_area_for_type})
-
-    # Step 2: If oversized, perform intelligent scaling
     if total_requested_area > available_area:
-        print(f"Warning: Requested area ({total_requested_area:.0f} sqft) exceeds buildable area ({available_area:.0f} sqft). Scaling rooms...")
-        
-        # First, guarantee minimum size for all rooms
         guaranteed_area = 0
         for spec_info in initial_specs:
-            min_dims = DEFAULT_MIN_SIZES.get(spec_info['type'], (5,5))
-            min_area = min_dims[0] * min_dims[1]
-            spec_info['min_total_area'] = min_area * spec_info['count']
-            guaranteed_area += spec_info['min_total_area']
-        
-        # Check if even the minimums are too large
+            min_dims = DEFAULT_MIN_SIZES.get(spec_info['type'], (5,5)); min_area = min_dims[0] * min_dims[1]
+            spec_info['min_total_area'] = min_area * spec_info['count']; guaranteed_area += spec_info['min_total_area']
         if guaranteed_area > available_area:
             return {"error": f"Plot is too small. Minimum required area is {guaranteed_area:.0f} sqft, but only {available_area:.0f} is available."}, None
-        
-        # Distribute the *remaining* space proportionally
         remaining_area_to_distribute = available_area - guaranteed_area
         overage_area = total_requested_area - guaranteed_area
-        
         for spec_info in initial_specs:
-            # The proportion of the "extra" (above minimum) space this room type gets
             proportion_of_overage = (spec_info['total_area'] - spec_info['min_total_area']) / overage_area if overage_area > 0 else 0
-            # Final area is its guaranteed minimum + its share of the remainder
             final_total_area = spec_info['min_total_area'] + (remaining_area_to_distribute * proportion_of_overage)
             spec_info['final_area_per_room'] = final_total_area / spec_info['count']
     else:
-        # If not oversized, just calculate area per room
-        for spec_info in initial_specs:
-            spec_info['final_area_per_room'] = spec_info['total_area'] / spec_info['count']
+        for spec_info in initial_specs: spec_info['final_area_per_room'] = spec_info['total_area'] / spec_info['count']
     
-    # Step 3: Create the final RoomSpec objects for the generator
-    room_counters = {}
+    # Create final RoomSpec objects
+    room_counters = {}; specs = []
     for spec_info in initial_specs:
         rtype = spec_info['type']
         for _ in range(spec_info['count']):
             room_counters[rtype] = room_counters.get(rtype, 0) + 1
             name = f"{rtype.capitalize()} {room_counters[rtype]}"
-            # (Naming improvements from v3.2)
             if rtype == "master": name = "Master Bedroom"
             if rtype == "entrance" and spec_info['count'] == 1: name = "Entrance"
             if rtype == "kitchen" and spec_info['count'] == 1: name = "Kitchen"
             specs.append(RoomSpec(name, rtype, spec_info['final_area_per_room']))
 
-    # Add essentials and run generator
+    # Add essentials
     if not any(s.type == 'entrance' for s in specs): specs.insert(0, RoomSpec("Entrance","entrance",40,priority=0))
     if not any(s.type == 'corridor' for s in specs): specs.append(RoomSpec("Corridor", "corridor", area_ft2=w*4))
 
+    # --- PHASE 2, STEP 2: Build the Adjacency Graph ---
+    adj_graph = nx.Graph()
+    # Add nodes (all unique room names)
+    for spec in specs: adj_graph.add_node(spec.name)
+    
+    # Define rules and add edges
+    living_rooms = [s.name for s in specs if s.type == 'living']
+    kitchens = [s.name for s in specs if s.type == 'kitchen']
+    masters = [s.name for s in specs if s.type == 'master']
+    bedrooms = [s.name for s in specs if s.type == 'bedroom']
+    
+    # Rule: Kitchen must be adjacent to a Living Room
+    if kitchens and living_rooms:
+        adj_graph.add_edge(kitchens[0], living_rooms[0], rule='must_be_adjacent')
+
+    # Rule: Master bedroom must NOT be adjacent to noisy rooms
+    for master_name in masters:
+        for noisy_room in kitchens + living_rooms:
+             adj_graph.add_edge(master_name, noisy_room, rule='must_not_be_adjacent')
+
+    # --- Run Generator ---
     gen = FloorPlanGenerator(w,h)
-    meta = {"entrance_side": "south", "front_direction": "south", "features": [item.get("type") for item in constraints.get("features", [])]}
+    meta = {"entrance_side": "south", 
+            "front_direction": "south", 
+            "features": [],
+            "adjacency_graph": adj_graph # Pass the graph to the generator
+           }
     ok,msg,meta_out = gen.generate(specs, meta)
     
     return {

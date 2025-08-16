@@ -5,3 +5,5 @@ requests
 pydantic
 matplotlib
 httpx
+shapely
+networkx
