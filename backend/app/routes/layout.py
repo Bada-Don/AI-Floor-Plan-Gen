@@ -40,16 +40,18 @@ async def generate_floorplan(req: GenerateLayoutRequest): # Route must be asynch
 
         # Convert PlacedRoom objects to the Pydantic Feature model
         cell_ft = 2
-        features_list_ft = [
-            Feature(
-                type=pr.type,
-                x=pr.x * cell_ft,
-                y=pr.y * cell_ft,
-                width=pr.w * cell_ft,
-                height=pr.h * cell_ft,
-                label=pr.name
-            ) for pr in placed_rooms
-        ]
+        features_list_ft = []
+        for pr in placed_rooms:
+            if pr.polygon and not pr.polygon.is_empty:
+                minx, miny, maxx, maxy = pr.polygon.bounds
+                features_list_ft.append(Feature(
+                    type=pr.type,
+                    x=minx * cell_ft,
+                    y=miny * cell_ft,
+                    width=(maxx - minx) * cell_ft,
+                    height=(maxy - miny) * cell_ft,
+                    label=pr.name
+                ))
 
         # Return the successful layout response
         return LayoutResponse(

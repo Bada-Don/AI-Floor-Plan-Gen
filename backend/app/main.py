@@ -1,6 +1,6 @@
 # main.py
 from fastapi import FastAPI
-from app.routes import layout
+from app.routes import layout, health
 from fastapi.middleware.cors import CORSMiddleware # <--- Import CORS
 
 app = FastAPI()
@@ -21,7 +21,4 @@ app.add_middleware(
 # -------------------------
 
 app.include_router(layout.router)
-
-@app.get("/health")
-def health():
-    return {"status": "ok"}
+app.include_router(health.router)
