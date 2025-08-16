@@ -388,7 +388,10 @@ def generate_layout_from_constraints(constraints: Dict[str, Any]) -> Tuple[Dict[
         elif "bath" in rtype_base: rtype = "bathroom"
         elif "kitch" in rtype_base: rtype = "kitchen"
         elif "entran" in rtype_base: rtype = "entrance"
-        else: continue
+        else:
+            # If not a core type, use its own name as the type
+            # This makes the generator flexible to any new room type
+            rtype = rtype_base
         count = int(item.get("count",1)); total_area_for_type = item.get("area", 100 * count)
         total_requested_area += total_area_for_type
         initial_specs.append({'type': rtype, 'count': count, 'total_area': total_area_for_type})
