@@ -16,6 +16,8 @@ from scipy.spatial import Voronoi
 from descartes import PolygonPatch
 import scipy # --- FIX: Required for catching specific QhullError ---
 
+import matplotlib.patches as mpatches
+
 
 # === Architectural Rules & Constants (Phase 3) ===
 WEIGHT_ADJACENCY = 80.0
@@ -73,6 +75,97 @@ class FloorPlanGenerator:
         intersection = room1.polygon.intersection(room2.polygon)
         if isinstance(intersection, LineString): return intersection
         return None
+        # Add this to the validation function to see what's wrong
+    def debug_polygon_structure(self, polygon, name):
+        try:
+            coords = list(polygon.exterior.coords)
+            print(f"DEBUG {name}: {len(coords)} coords")
+            for i, coord in enumerate(coords[:3]):  # Show first 3
+                print(f"  Coord {i}: {coord} (type: {type(coord)}, len: {len(coord) if hasattr(coord, '__len__') else 'N/A'})")
+        except Exception as e:
+            print(f"DEBUG {name}: Failed to debug - {e}")
+    
+    def _validate_polygon_for_rendering(self, polygon: Polygon, room_name: str = "Unknown") -> bool:
+        """
+        Deep validation to ensure polygon can be rendered by descartes/matplotlib
+        """
+        try:
+            # Basic checks
+            if not isinstance(polygon, Polygon) or polygon.is_empty or not polygon.is_valid:
+                return False
+            
+            if polygon.area < 1.0:
+                return False
+            
+            # Check exterior coordinates
+            if not hasattr(polygon, 'exterior'):
+                return False
+            
+            coords = polygon.exterior.coords
+            
+            # Check if coords is accessible
+            try:
+                coord_list = list(coords)
+                if len(coord_list) < 4:
+                    print(f"Insufficient coordinates for {room_name}: {len(coord_list)}")
+                    return False
+                # Ensure every item is a 2-element sequence
+                for i, coord in enumerate(coord_list):
+                    if not isinstance(coord, (tuple, list)) or len(coord) < 2:
+                        print(f"Bad coord at {i} in {room_name}: {coord}")
+                        return False
+            except Exception as e:
+                print(f"Cannot convert coords to list for {room_name}: {e}")
+                return False
+            
+            if len(coord_list) < 4:
+                print(f"Insufficient coordinates for {room_name}: {len(coord_list)}")
+                return False
+            
+            # Validate each coordinate
+            for i, coord in enumerate(coord_list):
+                try:
+                    if len(coord) < 2:
+                        print(f"Invalid coordinate {i} for {room_name}: {coord}")
+                        return False
+                    
+                    x, y = coord[0], coord[1]
+                    if not (isinstance(x, (int, float)) and isinstance(y, (int, float))):
+                        print(f"Non-numeric coordinates for {room_name}: {coord}")
+                        return False
+                    
+                    if not (math.isfinite(x) and math.isfinite(y)):
+                        print(f"Non-finite coordinates for {room_name}: {coord}")
+                        return False
+                        
+                except Exception as e:
+                    print(f"Error validating coordinate {i} for {room_name}: {e}")
+                    return False
+            
+            # Test if descartes can handle it by creating a numpy array (this is what fails)
+            try:
+                import numpy as np
+                coords_array = np.atleast_2d(np.asarray(coord_list))
+                if coords_array.shape[0] < 4 or coords_array.shape[1] < 2:
+                    print(f"Invalid coordinate array for {room_name}: shape={coords_array.shape}")
+                    return False
+
+                    
+                # Test the specific operation that's failing in descartes
+                test_slice = coords_array[:, :2]  # This is the operation that fails
+                if test_slice.size == 0:
+                    print(f"Empty coordinate slice for {room_name}")
+                    return False
+                    
+            except Exception as e:
+                print(f"Numpy validation failed for {room_name}: {e}")
+                return False
+            
+            return True
+            
+        except Exception as e:
+            print(f"General validation failed for {room_name}: {e}")
+            return False
 
     def _create_voronoi_layout(self, specs: List[RoomSpec]) -> List[PlacedRoom]:
         num_rooms = len(specs)
@@ -331,25 +424,14 @@ class FloorPlanGenerator:
             if poly.geom_type == 'MultiPolygon':
                 poly = max(poly.geoms, key=lambda p: p.area)
 
-            # Enhanced validation - check if exterior coordinates are accessible and valid
-            try:
-                coords = list(poly.exterior.coords)
-                if len(coords) < 4:  # A closed polygon needs at least 4 points (e.g., a,b,c,a)
-                    print(f"Warning: Discarding room '{room.name}' - insufficient coordinates ({len(coords)}).")
-                    continue
-                
-                # Additional check: ensure all coordinates are proper 2D points
-                if not all(len(coord) >= 2 and all(isinstance(x, (int, float)) for x in coord[:2]) for coord in coords):
-                    print(f"Warning: Discarding room '{room.name}' - malformed coordinate values.")
-                    continue
-                    
-            except (AttributeError, IndexError, TypeError) as e:
-                print(f"Warning: Discarding room '{room.name}' due to malformed coordinate structure: {e}")
+            if poly.geom_type not in ["Polygon", "MultiPolygon"]:
+                print(f"Warning: Discarding room '{room.name}' - invalid geom_type {poly.geom_type}")
                 continue
 
-            # Final check
-            if not (isinstance(poly, Polygon) and poly.is_valid and poly.area > 1.0):
-                print(f"Warning: Discarding room '{room.name}' as it could not be fixed into a valid polygon.")
+
+            # Use the enhanced validation
+            if not self._validate_polygon_for_rendering(poly, room.name):
+                print(f"Warning: Discarding room '{room.name}' - failed rendering validation.")
                 continue
 
             room.polygon = poly
@@ -411,19 +493,37 @@ class FloorPlanGenerator:
         colors = {"public": "#98FB98", "private": "#87CEEB", "service": "#FFA07A", "storage": "#DDDDDD"}
 
         for r in self.placed:
-            try:
-                # The final check before rendering
-                if not (isinstance(r.polygon, Polygon) and hasattr(r.polygon, 'exterior') and len(r.polygon.exterior.coords) > 0):
-                    print(f"Skipping rendering for room '{r.name}' due to invalid geometry.")
-                    continue
-
-                patch = PolygonPatch(r.polygon, facecolor=colors.get(r.zone, "#DDD"), edgecolor="gray", linewidth=0.8, alpha=0.9)
-                ax.add_patch(patch)
-                ax.text(r.center()[0], r.center()[1], f"{r.name}\n({r.area:.0f} sqft)", ha="center", va="center", fontsize=7, wrap=True)
-            except Exception as e:
-                print(f"CRITICAL: Failed to render room '{r.name}' despite cleaning. Error: {e}")
+            poly = r.polygon
+            if not isinstance(poly, Polygon):
+                print(f"Skipping {r.name} - geometry type {poly.geom_type}")
+                continue
+            if not self._validate_polygon_for_rendering(poly, r.name):
+                print(f"Skipping rendering for room '{r.name}' - failed validation.")
                 continue
 
+            try:
+                # Convert Shapely polygon to matplotlib-compatible coordinates
+                coords = list(poly.exterior.coords)
+                if len(coords) < 4:
+                    print(f"Skipping {r.name} - insufficient coordinates")
+                    continue
+                
+                # Create matplotlib Polygon patch directly
+                patch = mpatches.Polygon(coords, 
+                                    facecolor=colors.get(r.zone, "#DDD"),
+                                    edgecolor="gray", 
+                                    linewidth=0.8, 
+                                    alpha=0.9)
+                ax.add_patch(patch)
+                
+                center = r.center()
+                ax.text(center[0], center[1], f"{r.name}\n({r.area:.0f} sqft)",
+                        ha="center", va="center", fontsize=7, wrap=True)
+            except Exception as e:
+                print(f"CRITICAL: Failed to render room '{r.name}' after fix attempt. Error: {e}")
+                continue
+
+        # Fix door rendering...
         door_width_units = ft_to_units(3, self.cell_ft)
         for opening in self.openings:
             mx, my = opening['midpoint']
@@ -433,59 +533,39 @@ class FloorPlanGenerator:
                 p1, p2 = (mx, my - door_width_units / 2), (mx, my + door_width_units / 2)
             ax.plot([p1[0], p2[0]], [p1[1], p2[1]], color='white', linewidth=3.5, zorder=5)
 
-        # FIX: Enhanced validation for merged shape rendering
+        # Fix merged shape rendering
         valid_polygons = []
         for r in self.placed:
-            try:
-                # Additional validation before adding to valid_polygons
-                if (isinstance(r.polygon, Polygon) and 
-                    r.polygon.is_valid and 
-                    not r.polygon.is_empty and
-                    hasattr(r.polygon, 'exterior') and
-                    len(r.polygon.exterior.coords) > 3):  # Ensure we have enough coordinates
-                    
-                    # Test if coordinates are accessible and properly formatted
-                    coords = list(r.polygon.exterior.coords)
-                    if len(coords) > 0 and all(len(coord) >= 2 for coord in coords):
-                        valid_polygons.append(r.polygon)
-            except (AttributeError, IndexError, TypeError) as e:
-                print(f"Skipping polygon for room '{r.name}' in merged shape due to coordinate issues: {e}")
-                continue
+            if isinstance(r.polygon, Polygon) and not r.polygon.is_empty:
+                valid_polygons.append(r.polygon)
 
         if valid_polygons:
             try:
                 merged_shape = unary_union(valid_polygons)
                 if merged_shape.is_valid and not merged_shape.is_empty:
                     if merged_shape.geom_type == 'Polygon':
-                        # Additional validation before creating patch
-                        if (hasattr(merged_shape, 'exterior') and 
-                            len(merged_shape.exterior.coords) > 3):
-                            try:
-                                coords = list(merged_shape.exterior.coords)
-                                if all(len(coord) >= 2 for coord in coords):
-                                    patch = PolygonPatch(merged_shape, facecolor='none', edgecolor='black', linewidth=3, zorder=10)
-                                    ax.add_patch(patch)
-                            except Exception as e:
-                                print(f"Failed to render merged shape outline: {e}")
-                                
+                        try:
+                            coords = list(merged_shape.exterior.coords)
+                            patch = mpatches.Polygon(coords, facecolor='none', 
+                                                edgecolor='black', linewidth=3, zorder=10)
+                            ax.add_patch(patch)
+                        except Exception as e:
+                            print(f"Failed to render merged shape outline: {e}")
+                            
                     elif merged_shape.geom_type == 'MultiPolygon':
-                        for poly in merged_shape.geoms:
-                            if (isinstance(poly, Polygon) and 
-                                poly.is_valid and 
-                                not poly.is_empty and
-                                hasattr(poly, 'exterior') and
-                                len(poly.exterior.coords) > 3):
-                                try:
-                                    coords = list(poly.exterior.coords)
-                                    if all(len(coord) >= 2 for coord in coords):
-                                        patch = PolygonPatch(poly, facecolor='none', edgecolor='black', linewidth=3, zorder=10)
-                                        ax.add_patch(patch)
-                                except Exception as e:
-                                    print(f"Failed to render one polygon in MultiPolygon outline: {e}")
-                                    continue
+                        for i, poly in enumerate(merged_shape.geoms):
+                            try:
+                                coords = list(poly.exterior.coords)
+                                patch = mpatches.Polygon(coords, facecolor='none', 
+                                                    edgecolor='black', linewidth=3, zorder=10)
+                                ax.add_patch(patch)
+                            except Exception as e:
+                                print(f"Failed to render polygon {i} in MultiPolygon outline: {e}")
+                                continue
             except Exception as e:
                 print(f"Failed to create or render merged shape: {e}")
 
+        # Rest of your rendering code...
         ent = next((r for r in self.placed if r.type == 'entrance'), None)
         if ent:
             try:
@@ -495,11 +575,17 @@ class FloorPlanGenerator:
             except Exception as e:
                 print(f"Failed to render entrance marker: {e}")
 
-        ax.set_xlim(-2, self.grid.width + 2); ax.set_ylim(-2, self.grid.height + 2)
-        ax.set_aspect("equal"); ax.axis("off")
+        ax.set_xlim(-2, self.grid.width + 2)
+        ax.set_ylim(-2, self.grid.height + 2)
+        ax.set_aspect("equal")
+        ax.axis("off")
         ax.set_title(title, fontsize=14, fontweight="bold")
         plt.gca().invert_yaxis()
-        buf = io.BytesIO(); plt.savefig(buf, format='png', bbox_inches='tight'); plt.close(fig); buf.seek(0)
+        
+        buf = io.BytesIO()
+        plt.savefig(buf, format='png', bbox_inches='tight')
+        plt.close(fig)
+        buf.seek(0)
         return base64.b64encode(buf.getvalue()).decode('utf-8')
 
 def generate_layout_from_constraints(constraints: Dict[str, Any]) -> Tuple[Dict[str, Any], Any]:
